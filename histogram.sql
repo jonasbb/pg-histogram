@@ -5,7 +5,7 @@
 --    -#    FROM auth_user
 --    -# )
 --    -# SELECT * FROM show_histogram((SELECT histogram(length, 12, 32, 10) FROM email_lengths))
---  bucket |  range  | count | overflow |                 bar                  |             cumbar             | cumsum |      cumpct       
+--  bucket |  range  | count | overflow |                 bar                  |             cumbar             | cumsum |      cumpct
 -- --------+---------+-------+----------+--------------------------------------+--------------------------------+--------+-------------------
 --       0 | [12,14) |    17 |       -4 | =======--                            | ==                             |     21 |             0.056
 --       1 | [14,16) |    83 |        0 | ==================================== | ========                       |    104 | 0.277333333333333
@@ -19,116 +19,175 @@
 --       9 | [30,32) |    11 |       18 | =====++++++++                        | ============================== |    375 |                 1
 -- (10 rows)
 -- psql#
-
-
 BEGIN;
 
-CREATE OR REPLACE FUNCTION histogram_version() RETURNS TEXT AS $$
-    SELECT '0.1.0'::text;
-$$ LANGUAGE SQL;
+CREATE OR REPLACE FUNCTION histogram_version ()
+    RETURNS text
+    AS $$
+    SELECT
+        '0.1.0'::text;
+
+$$
+LANGUAGE SQL;
 
 DROP TYPE IF EXISTS histogram_result CASCADE;
+
 CREATE TYPE histogram_result AS (
-	count INTEGER,
-	overflow INTEGER,
-	total INTEGER,
-	bucket INTEGER,
-	range numrange
+    count integer,
+    overflow integer,
+    total integer,
+    bucket integer,
+    RANGE numrange
 );
 
-CREATE OR REPLACE FUNCTION histogram_sfunc(state histogram_result[], val float8, min float8, max float8, nbuckets INTEGER) RETURNS histogram_result[] AS $$
+CREATE OR REPLACE FUNCTION histogram_sfunc (
+    state histogram_result[],
+    val float8,
+    min float8,
+    max float8,
+    nbuckets integer
+)
+    RETURNS histogram_result[]
+    AS $$
 DECLARE
-	bucket INTEGER;
-	overflow INTEGER;
-	incr INTEGER;
-	width float8;
-	i INTEGER;
-	init_range numrange;
+    bucket integer;
+    overflow integer;
+    incr integer;
+    width float8;
+    i integer;
+    init_range numrange;
 BEGIN
-	-- Initialize the state
-	IF state[0] IS NULL THEN
-		width := (max - min) / nbuckets;
-		FOR i IN SELECT * FROM generate_series(0, nbuckets - 1) LOOP
-			init_range := numrange(
-				(min + i * width)::numeric,
-				(min + (i + 1) * width)::numeric
-			);
-			state[i] := (0, 0, 0, i, init_range);
-		END LOOP;
-	END IF;
-
-	bucket := floor(((val - min) / (max - min)) * nbuckets);
-	bucket := GREATEST(bucket, 0);
-	bucket := LEAST(bucket, nbuckets - 1);
-
-	overflow := CASE
-		WHEN val < min THEN -1
-		WHEN val >= max THEN 1
-		ELSE 0
-	END;
-	incr := CASE WHEN overflow = 0 THEN 1 ELSE 0 END;
-
-	state[bucket] = (
-		state[bucket].count + incr,
-		state[bucket].overflow + overflow,
-		state[bucket].total + 1,
-		state[bucket].bucket,
-		state[bucket].range
-	);
-
-	RETURN state;
+    -- Initialize the state
+    IF state[0] IS NULL THEN
+        width := (max - min) / nbuckets;
+        FOR i IN
+        SELECT
+            *
+        FROM
+            generate_series(0, nbuckets - 1)
+            LOOP
+                init_range := numrange((min + i * width)::numeric, (min + (i + 1) * width)::numeric);
+                state[i] := (0,
+                    0,
+                    0,
+                    i,
+                    init_range);
+            END LOOP;
+    END IF;
+    bucket := floor(((val - min) / (max - min)) * nbuckets);
+    bucket := GREATEST (bucket, 0);
+    bucket := LEAST (bucket, nbuckets - 1);
+    overflow := CASE WHEN val < min THEN
+        - 1
+    WHEN val >= max THEN
+        1
+    ELSE
+        0
+    END;
+    incr := CASE WHEN overflow = 0 THEN
+        1
+    ELSE
+        0
+    END;
+    state[bucket] = (state[bucket].count + incr,
+        state[bucket].overflow + overflow,
+        state[bucket].total + 1,
+        state[bucket].bucket,
+        state[bucket].RANGE);
+    RETURN state;
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
- 
-CREATE AGGREGATE histogram(float8, float8, float8, INTEGER) (
-	SFUNC = histogram_sfunc,
-	STYPE = histogram_result[]
+$$
+LANGUAGE plpgsql
+IMMUTABLE;
+
+CREATE AGGREGATE histogram (float8, float8, float8, integer) (
+    SFUNC = histogram_sfunc,
+    STYPE = histogram_result[]
 );
 
-CREATE OR REPLACE FUNCTION histogram_bar(v float8, tick_size float8, overflow float8 = 0)
-RETURNS TEXT AS $$
+CREATE OR REPLACE FUNCTION histogram_bar (
+    v float8,
+    tick_size float8,
+    overflow float8 = 0
+)
+    RETURNS text
+    AS $$
 DECLARE
-	suffix TEXT;
+    suffix text;
 BEGIN
-	suffix := CASE WHEN overflow < 0 THEN repeat('-', (-overflow * tick_size)::integer) ELSE '' END;
-	suffix := suffix || CASE WHEN overflow > 0 THEN repeat('+', (overflow * tick_size)::integer) ELSE '' END;
-	return repeat('=', (v * tick_size)::integer) || suffix;
+    suffix := CASE WHEN overflow < 0 THEN
+        repeat('-', (- overflow * tick_size)::integer)
+    ELSE
+        ''
+    END;
+    suffix := suffix || CASE WHEN overflow > 0 THEN
+        repeat('+', (overflow * tick_size)::integer)
+    ELSE
+        ''
+    END;
+    RETURN repeat('=', (v * tick_size)::integer) || suffix;
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$
+LANGUAGE plpgsql
+IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION show_histogram(h histogram_result[])
-RETURNS TABLE(bucket INTEGER, range numrange, count INTEGER, overflow INTEGER, bar TEXT, cumbar TEXT, cumsum INTEGER, cumpct float8) AS $$
+CREATE OR REPLACE FUNCTION show_histogram (
+    h histogram_result[]
+)
+    RETURNS TABLE (
+            bucket integer,
+            RANGE numrange,
+            count integer,
+            overflow integer,
+            bar text,
+            cumbar text,
+            cumsum integer,
+            cumpct float8
+        )
+        AS $$
 DECLARE
-	r histogram_result;
-	min_count integer := (select min(x.total) from unnest(h) as x);
-	max_count integer := (select max(x.total) from unnest(h) as x);
-	total_count integer := (select sum(x.total) from unnest(h) as x);
-	bar_max_width integer := 30;
-	bar_tick_size float8 := bar_max_width / (max_count - min_count)::float8;
-	bar text;
-	cumsum integer := 0;
-	cumpct float8;
+    r histogram_result;
+    min_count integer := (
+        SELECT
+            min(x.total)
+        FROM
+            unnest(h) AS x);
+    max_count integer := (
+        SELECT
+            max(x.total)
+        FROM
+            unnest(h) AS x);
+    total_count integer := (
+        SELECT
+            sum(x.total)
+        FROM
+            unnest(h) AS x);
+    bar_max_width integer := 30;
+    bar_tick_size float8 := bar_max_width / (max_count - min_count)::float8;
+    bar text;
+    cumsum integer := 0;
+    cumpct float8;
 BEGIN
-	FOREACH r IN ARRAY h LOOP
-		IF r.bucket IS NULL THEN
-			CONTINUE;
-		END IF;
-
-		cumsum := cumsum + r.count + abs(r.overflow);
-		cumpct := (cumsum::float8 / total_count);
-		bar := histogram_bar(r.count, bar_tick_size, r.overflow);
-		RETURN QUERY VALUES (
-			r.bucket,
-			r.range,
-			r.count,
-			r.overflow,
-			bar,
-			histogram_bar(cumpct, bar_max_width),
-			cumsum,
-			cumpct
-		);
-	END loop;
+    FOREACH r IN ARRAY h LOOP
+        IF r.bucket IS NULL THEN
+            CONTINUE;
+        END IF;
+        cumsum := cumsum + r.count + abs(r.overflow);
+        cumpct := (cumsum::float8 / total_count);
+        bar := histogram_bar (r.count, bar_tick_size, r.overflow);
+        RETURN QUERY
+    VALUES (r.bucket,
+        r.range,
+        r.count,
+        r.overflow,
+        bar,
+        histogram_bar (cumpct, bar_max_width),
+        cumsum,
+        cumpct);
+    END LOOP;
 END;
-$$ LANGUAGE plpgsql;
+$$
+LANGUAGE plpgsql;
 
 COMMIT;
+
