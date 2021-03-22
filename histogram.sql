@@ -25,10 +25,11 @@ CREATE OR REPLACE FUNCTION histogram_version ()
     RETURNS text
     AS $$
     SELECT
-        '0.1.0'::text;
+        '0.2.0'::text;
 
 $$
-LANGUAGE SQL;
+LANGUAGE SQL
+IMMUTABLE PARALLEL SAFE;
 
 DROP TYPE IF EXISTS histogram_result CASCADE;
 
@@ -98,11 +99,44 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql
-IMMUTABLE;
+IMMUTABLE PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION histogram_combinefunc (
+    state_left histogram_result[],
+    state_right histogram_result[]
+)
+    RETURNS histogram_result[]
+    AS $$
+DECLARE
+    i integer;
+BEGIN
+    -- left or right might not be initialized yet
+    -- in that case return the other size
+    IF state_left[0] IS NULL THEN
+        RETURN state_right;
+    END IF;
+    IF state_right[0] IS NULL THEN
+        RETURN state_left;
+    END IF;
+    FOR i IN array_lower(state_left, 1)..array_upper(state_left, 1)
+    LOOP
+        state_left[i] = (state_left[i].count + state_right[i].count,
+            state_left[i].overflow + state_right[i].overflow,
+            state_left[i].total + state_right[i].total,
+            state_left[i].bucket,
+            state_left[i].RANGE);
+    END LOOP;
+    RETURN state_left;
+END;
+$$
+LANGUAGE plpgsql
+IMMUTABLE PARALLEL SAFE;
 
 CREATE AGGREGATE histogram (float8, float8, float8, integer) (
     SFUNC = histogram_sfunc,
-    STYPE = histogram_result[]
+    COMBINEFUNC = histogram_combinefunc,
+    STYPE = histogram_result[],
+    PARALLEL = SAFE
 );
 
 CREATE OR REPLACE FUNCTION histogram_bar (
@@ -129,7 +163,7 @@ BEGIN
 END;
 $$
 LANGUAGE plpgsql
-IMMUTABLE;
+IMMUTABLE PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION show_histogram (
     h histogram_result[]
@@ -163,7 +197,7 @@ DECLARE
         FROM
             unnest(h) AS x);
     bar_max_width integer := 30;
-    bar_tick_size float8 := bar_max_width / (max_count - min_count)::float8;
+    bar_tick_size float8 := bar_max_width / max_count::float8;
     bar text;
     cumsum integer := 0;
     cumpct float8;
@@ -187,7 +221,8 @@ BEGIN
     END LOOP;
 END;
 $$
-LANGUAGE plpgsql;
+LANGUAGE plpgsql
+IMMUTABLE PARALLEL SAFE ROWS 50;
 
 COMMIT;
 
